@@ -1,0 +1,253 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  NORMAL
+  DOWN
+  MAINTENANCE
+  KARAOKE_ONLY
+  QUIZ_ONLY
+  AMBIANCE
+}
+
+enum QuizType {
+  QUIZ
+  BLIND_TEST
+  KARAOKE
+}
+
+enum GameMode {
+  QUIZ
+  BLIND_TEST
+  KARAOKE
+  AMBIANCE
+}
+
+enum SessionStatus {
+  WAITING
+  ACTIVE
+  PAUSED
+  FINISHED
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+  DEBUG
+}
+
+enum SyncStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+model Tenant {
+  id            String       @id @default(uuid())
+  name          String       @unique @db.VarChar(50)
+  status        TenantStatus @default(NORMAL)
+  ipAddress     String?      @map("ip_address") @db.Inet
+  lastHeartbeat DateTime?    @map("last_heartbeat")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  roomConfig   RoomConfiguration?
+  gameSessions GameSession[]
+  systemLogs   SystemLog[]
+  cacheSync    CacheSyncStatus?
+
+  @@map("tenants")
+}
+
+model User {
+  id               String   @id @default(uuid())
+  email            String   @unique @db.VarChar(255)
+  passwordHash     String   @map("password_hash") @db.VarChar(255)
+  refreshTokenHash String?  @map("refresh_token_hash") @db.VarChar(255)
+  role             String   @default("SUPER_ADMIN") @db.VarChar(20)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  quizzesCreated QuizCatalog[]
+
+  @@map("users")
+}
+
+model QuizCatalog {
+  id         String   @id @default(uuid())
+  title      String   @db.VarChar(255)
+  category   String   @db.VarChar(100)
+  type       QuizType
+  difficulty Int?
+  isActive   Boolean  @default(true) @map("is_active")
+  version    Int      @default(1)
+  createdBy  String?  @map("created_by")
+  creator    User?    @relation(fields: [createdBy], references: [id])
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  questions    Question[]
+  karaokeSongs KaraokeSong[]
+  gameSessions GameSession[]
+
+  @@index([category])
+  @@index([isActive])
+  @@map("quiz_catalog")
+}
+
+model Question {
+  id             String      @id @default(uuid())
+  quizId         String      @map("quiz_id")
+  quiz           QuizCatalog @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  text           String
+  mediaUrl       String?     @map("media_url") @db.VarChar(255)
+  timeLimit      Int         @default(30) @map("time_limit")
+  points         Int         @default(1)
+  shuffleOptions Boolean     @default(true) @map("shuffle_options")
+  orderIndex     Int         @map("order_index")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  answerOptions AnswerOption[]
+  playerAnswers PlayerAnswer[]
+
+  @@index([quizId, orderIndex])
+  @@map("questions")
+}
+
+model AnswerOption {
+  id         String   @id @default(uuid())
+  questionId String   @map("question_id")
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String   @db.VarChar(255)
+  isCorrect  Boolean  @default(false) @map("is_correct")
+  orderIndex Int      @map("order_index")
+
+  playerAnswers PlayerAnswer[]
+
+  @@map("answer_options")
+}
+
+model KaraokeSong {
+  id            String      @id @default(uuid())
+  quizId        String      @map("quiz_id")
+  quiz          QuizCatalog @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  title         String      @db.VarChar(255)
+  artist        String      @db.VarChar(255)
+  lyricsJson    Json        @map("lyrics_json")
+  externalApiId String?     @map("external_api_id") @db.VarChar(100)
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  @@map("karaoke_songs")
+}
+
+model RoomConfiguration {
+  id              String   @id @default(uuid())
+  tenantId        String   @unique @map("tenant_id")
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  audioProfile    Json     @default("{\"volume\": 70, \"eq_bands\": {}, \"latency_compensation\": 20}") @map("audio_profile")
+  lightingProfile Json     @default("{\"default_ambiance\": \"WARM\", \"intensity\": 80, \"dmx_universe\": 1}") @map("lighting_profile")
+  buzzerConfig    Json     @default("{\"debounce_ms\": 50, \"sound_effect\": \"click.wav\"}") @map("buzzer_config")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("room_configurations")
+}
+
+model GameSession {
+  id                   String        @id @default(uuid())
+  tenantId             String        @map("tenant_id")
+  tenant               Tenant        @relation(fields: [tenantId], references: [id])
+  quizId               String?       @map("quiz_id")
+  quiz                 QuizCatalog?  @relation(fields: [quizId], references: [id])
+  mode                 GameMode
+  startedAt            DateTime      @default(now()) @map("started_at")
+  endedAt              DateTime?     @map("ended_at")
+  status               SessionStatus @default(WAITING)
+  currentQuestionIndex Int           @default(0) @map("current_question_index")
+  scoresCache          Json          @default("{}") @map("scores_cache")
+  createdAt            DateTime      @default(now()) @map("created_at")
+
+  players       Player[]
+  playerAnswers PlayerAnswer[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, startedAt(sort: Desc)])
+  @@map("game_sessions")
+}
+
+model Player {
+  id             String      @id @default(uuid())
+  gameSessionId  String      @map("game_session_id")
+  gameSession    GameSession @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  name           String      @db.VarChar(50)
+  buzzerTabletId String?     @map("buzzer_tablet_id") @db.VarChar(50)
+  color          String      @default("#FFFFFF") @db.VarChar(7)
+  isActive       Boolean     @default(true) @map("is_active")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  answers PlayerAnswer[]
+
+  @@index([gameSessionId])
+  @@map("players")
+}
+
+model PlayerAnswer {
+  id               String        @id @default(uuid())
+  playerId         String        @map("player_id")
+  player           Player        @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  gameSessionId    String        @map("game_session_id")
+  gameSession      GameSession   @relation(fields: [gameSessionId], references: [id], onDelete: Cascade)
+  questionId       String        @map("question_id")
+  question         Question      @relation(fields: [questionId], references: [id])
+  selectedOptionId String?       @map("selected_option_id")
+  selectedOption   AnswerOption? @relation(fields: [selectedOptionId], references: [id])
+  isCorrect        Boolean?      @map("is_correct")
+  responseTimeMs   Int?          @map("response_time_ms")
+  scoreEarned      Int           @default(0) @map("score_earned")
+  jokerUsed        Json?         @map("joker_used")
+  answeredAt       DateTime      @default(now()) @map("answered_at")
+
+  @@index([gameSessionId, playerId])
+  @@index([questionId])
+  @@map("player_answers")
+}
+
+model SystemLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  level     LogLevel
+  source    String   @db.VarChar(50)
+  message   String
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("system_logs")
+}
+
+model CacheSyncStatus {
+  id           String     @id @default(uuid())
+  tenantId     String     @unique @map("tenant_id")
+  tenant       Tenant     @relation(fields: [tenantId], references: [id])
+  lastFullSync DateTime?  @map("last_full_sync")
+  quizVersion  Int        @default(0) @map("quiz_version")
+  syncStatus   SyncStatus @default(PENDING) @map("sync_status")
+  retryCount   Int        @default(0) @map("retry_count")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("cache_sync_status")
+}
